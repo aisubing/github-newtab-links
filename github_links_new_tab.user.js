@@ -3,7 +3,7 @@
 // @guid         https://github.com/aisubing/github-newtab-links
 // @namespace    http://tampermonkey.net/
 // @version      1.2.1
-// @description  在 GitHub个人主页的Overview/Repositories/Stars页面 ，把仓库链接在新标签页打开，其余页面与链接保持默认。
+// @description  在 GitHub 的个人主页的 Stars / Repositories 标签与个人主页 Overview，把仓库链接在新标签页打开，其余页面与链接保持默认。
 // @match        https://github.com/*
 // @run-at       document-start
 // @grant        none
@@ -44,7 +44,9 @@
 
   // Overview 页同样是单段路径，而 GitHub 自己的 '/login'、'/settings'、'/trending'
   // 也是单段。这里用"页面里存在 ?tab=repositories 标签链接"作为个人主页的身份信号，
-  // 而不是枚举保留路径——万一漏掉某个保留路径，结果是"不生效"而非"乱生效"。
+  // 而不是枚举保留路径——黑名单漏一项是"乱生效"，比漏判更糟。
+  // 但这条信号不是单向安全的：标记缺失（GitHub 改版）就不生效，标记误现（组织主页的
+  // 标签栏同样带 ?tab=repositories）就会多拦截。两个失效方向都存在。
   const isProfileOverview = (s) => {
     const tab = tabParam();
     if (s.length !== 1) return false;
@@ -62,7 +64,9 @@
   // 列表里的项目链接必然是同源的仓库地址：恰好两段 '/owner/repo'。
   // 同源判定是必需的：docs.github.com/articles/xxx 与 avatars.githubusercontent.com/u/xxx
   // 这类外链的 pathname 同样是两段，只比段数会把它们误当成仓库。
-  // '/stars'、'/<user>'、'/login'、tag 筛选、排序、分页段数不同，保持默认行为。
+  // '/<user>'、'/stars'、'/login' 是单段，段数不符即排除；'/owner/repo/blob/...' 段数更多。
+  // 注意 '/stars/<user>' 本身就是两段，段数条件在该页挡不住任何东西——翻页、排序、
+  // 筛选这些只改 query 的同路径链接，由 shouldIgnoreLink 里的"同 pathname 则忽略"兜住。
   // 排除页脚/导航，避免 '/features/xxx' 这类同样是两段的营销链接被误判。
   const isRepoLink = (a) =>
     a.host === window.location.host &&
@@ -84,7 +88,10 @@
 
     const normalizePath = (p) => (p || '').replace(/\/+$/, '');
 
-    // 同页锚点：目标 URL 与当前页同 origin、同 path（忽略尾部 /），仅 hash 不同 → 不新开标签（如 README 里「简体中文 | English」）
+    // 同路径链接：目标与当前页同 origin、同 path（尾部 / 忽略），query 或 hash 不同也算同路径。
+    // 覆盖面比"README 里「简体中文 | English」这类仅 hash 不同的跳转"更宽——列表页的翻页、
+    // 排序、语言/类型筛选都只改 query，在 '/stars/<user>' 这种本身就是两段的路径上，
+    // 段数条件挡不住它们，只有这条能。
     try {
       const u = new URL(a.href);
       const cur = window.location;
