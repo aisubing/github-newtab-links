@@ -1,9 +1,8 @@
 // ==UserScript==
 // @name         GitHub 仓库链接新标签页打开
-// @guid         https://github.com/aisubing/github-newtab-links
 // @namespace    http://tampermonkey.net/
-// @version      1.2.1
-// @description  在 GitHub 的个人主页的 Stars / Repositories 标签与个人主页 Overview，把仓库链接在新标签页打开，其余页面与链接保持默认。
+// @version      2.0.3
+// @description  在 GitHub 全站把仓库链接（同源、两段路径 作者/仓库）在新标签页打开；修饰键点击与其余链接一律保持浏览器默认行为。
 // @match        https://github.com/*
 // @run-at       document-start
 // @grant        none
@@ -22,56 +21,37 @@
 
   const closestAnchor = (el) => (el && el.closest ? el.closest('a[href]') : null);
 
-  // -------------------- Scope: 仓库列表型页面 --------------------
-  // 覆盖四种"一列仓库链接"的入口：
-  //   1. 自己的 stars 页：'/stars'、'/stars/' 以及公开的 '/stars/<user>'
-  //   2. 个人主页的 Stars 标签：'/<user>?tab=stars'（查看他人或自己的公开收藏）
-  //   3. 个人主页的 Repositories 标签：'/<user>?tab=repositories'
-  //   4. 个人主页 Overview：'/<user>'（Popular repositories 与活动流）
-  // 用分段/URLSearchParams 而非正则判断，避免 Tampermonkey 内置解析器对正则字面量误分词。
-  // 在点击那一刻读取 location，因此 Turbo/SPA 跳转后无需重新初始化即可生效。
   const pathSegs = (p) => p.split('/').filter(Boolean);
 
-  const LISTING_TABS = ['stars', 'repositories'];
+  // -------------------- 仓库链接判定：全站生效 --------------------
+  // 2.0 起不再区分页面：任何 github.com 页面上指向 '/owner/repo' 的同源链接都按仓库链接处理。
+  // GitHub 自身也有一批两段式路由（/topics/x、/orgs/x、/settings/x……），靠保留前缀名单排除。
+  // 这些名字全部被 GitHub 保留，不可能存在同名用户/组织，排除它们不会漏掉真实仓库；
+  // 名单漏写一条的后果只是那一类站点链接被误新开（轻度误伤），比漏掉仓库链接可接受。
+  const RESERVED_FIRST = new Set([
+    'topics', 'orgs', 'users', 'sponsors', 'settings', 'features',
+    'collections', 'marketplace', 'apps', 'advisories', 'organizations',
+    'blog', 'readme', 'site-policy', 'site-admin', 'codespaces',
+  ]);
 
-  const tabParam = () => {
-    try {
-      return new URLSearchParams(window.location.search).get('tab');
-    } catch (_) {
-      return null;
-    }
-  };
+  // 个人主页下与仓库同形的固定子页：/<user>/followers、/<user>/following。
+  // 这两个路由被站点页面占据，仓库名不可能叫这两个名字。
+  const RESERVED_SECOND = new Set(['followers', 'following']);
 
-  // Overview 页同样是单段路径，而 GitHub 自己的 '/login'、'/settings'、'/trending'
-  // 也是单段。这里用"页面里存在 ?tab=repositories 标签链接"作为个人主页的身份信号，
-  // 而不是枚举保留路径——黑名单漏一项是"乱生效"，比漏判更糟。
-  // 但这条信号不是单向安全的：标记缺失（GitHub 改版）就不生效，标记误现（组织主页的
-  // 标签栏同样带 ?tab=repositories）就会多拦截。两个失效方向都存在。
-  const isProfileOverview = (s) => {
-    const tab = tabParam();
-    if (s.length !== 1) return false;
-    if (tab !== null && tab !== 'overview') return false;
-    return !!document.querySelector('a[href*="tab=repositories"]');
-  };
-
-  const isListingPage = () => {
-    const s = pathSegs(window.location.pathname);
-    if (s[0] === 'stars' && s.length <= 2) return true;
-    if (s.length === 1 && LISTING_TABS.includes(tabParam())) return true;
-    return isProfileOverview(s);
-  };
-
-  // 列表里的项目链接必然是同源的仓库地址：恰好两段 '/owner/repo'。
+  // 恰好两段 '/owner/repo' 的同源链接即仓库链接。
   // 同源判定是必需的：docs.github.com/articles/xxx 与 avatars.githubusercontent.com/u/xxx
   // 这类外链的 pathname 同样是两段，只比段数会把它们误当成仓库。
-  // '/<user>'、'/stars'、'/login' 是单段，段数不符即排除；'/owner/repo/blob/...' 段数更多。
-  // 注意 '/stars/<user>' 本身就是两段，段数条件在该页挡不住任何东西——翻页、排序、
-  // 筛选这些只改 query 的同路径链接，由 shouldIgnoreLink 里的"同 pathname 则忽略"兜住。
-  // 排除页脚/导航，避免 '/features/xxx' 这类同样是两段的营销链接被误判。
-  const isRepoLink = (a) =>
-    a.host === window.location.host &&
-    pathSegs(a.pathname).length === 2 &&
-    !a.closest('footer, header, nav');
+  // '/<user>'、'/login'、'/topics' 是单段，'/owner/repo/blob/...' 段数更多，段数不符即排除。
+  // 排除页头/导航/页脚：那里的两段链接是 '/features/xxx'、'/organizations/new' 这类
+  // 站点入口，不是仓库。
+  const isRepoLink = (a) => {
+    if (a.host !== window.location.host) return false;
+    const segs = pathSegs(a.pathname);
+    if (segs.length !== 2) return false;
+    if (RESERVED_FIRST.has(segs[0].toLowerCase())) return false;
+    if (RESERVED_SECOND.has(segs[1].toLowerCase())) return false;
+    return !a.closest('footer, header, nav');
+  };
 
   const shouldIgnoreLink = (a) => {
     if (!a) return true;
@@ -89,9 +69,9 @@
     const normalizePath = (p) => (p || '').replace(/\/+$/, '');
 
     // 同路径链接：目标与当前页同 origin、同 path（尾部 / 忽略），query 或 hash 不同也算同路径。
-    // 覆盖面比"README 里「简体中文 | English」这类仅 hash 不同的跳转"更宽——列表页的翻页、
-    // 排序、语言/类型筛选都只改 query，在 '/stars/<user>' 这种本身就是两段的路径上，
-    // 段数条件挡不住它们，只有这条能。
+    // 仓库页顶部的仓库面包屑、列表页的翻页/排序/筛选——'/stars/<user>'、'/topics/<x>'
+    // 本身就是两段路径，段数条件挡不住它们——以及 README 里「简体中文 | English」这类
+    // 仅 query/hash 不同的跳转，都靠这条排除。
     try {
       const u = new URL(a.href);
       const cur = window.location;
@@ -104,7 +84,8 @@
   window.addEventListener(
     'click',
     (e) => {
-      if (!isListingPage()) return;
+      // 只拦真实用户点击：页面脚本用 element.click() 合成的导航（GitHub 偶用）不受影响
+      if (!e.isTrusted) return;
       if (isModifiedClick(e)) return;
 
       const a = closestAnchor(e.target);
@@ -116,7 +97,15 @@
 
       e.preventDefault();
       e.stopPropagation();
-      window.open(url, '_blank', 'noopener,noreferrer');
+      // 注意：features 里带 noopener 时 window.open 恒返回 null，无法据此区分
+      // "已打开"与"被拦截"。因此这里不带 noopener，拿到窗口引用后手动置空 opener
+      // （等效切断反向引用）；返回 null 才是真被拦截，此时退回当前页跳转。
+      const w = window.open(url, '_blank');
+      if (w) {
+        try { w.opener = null; } catch (_) {}
+      } else {
+        window.location.assign(url);
+      }
     },
     true
   );
